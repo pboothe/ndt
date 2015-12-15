@@ -230,7 +230,9 @@ static struct option long_options[] = {{"adminview", 0, 0, 'a'},
                                        {0, 0, 0, 0}};
 
 /**
- * Catch termination signal(s) and print message in log file
+ * Catch termination signal(s) and print message in log file. Not all functions
+ * are safe to call in a signal handler.  Check out `man signal` for a list of
+ * the okay functions to call, according to POSIX.
  * @param signo Signal number
  */
 void cleanup(int signo) {
