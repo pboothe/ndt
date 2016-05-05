@@ -246,6 +246,7 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
   int retvalue = 0;
   int streamsNum = 1;
   int activeStreams = 1;
+  int local_errno;
 
   struct sockaddr_storage cli_addr[MAX_STREAMS];
   Connection c2s_conns[MAX_STREAMS];
@@ -677,10 +678,20 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
     for (;;) {
       msgretvalue = select(mon_pipe[0] + 1, &rfd, NULL, NULL,
                            &sel_tv);
-      if ((msgretvalue == -1) && (errno == EINTR))
-        continue;
-      if (((msgretvalue == -1) && (errno != EINTR))
-          || (msgretvalue == 0)) {
+      if (msgretvalue <= 0) {
+        // Save a copy of errno in case FD_ functions change it.
+        local_errno = (msgretvalue == -1) ? errno : 0;
+        if (local_errno != 0) {
+          // From the select() man page:
+          //   On error ... the sets and timeout become undefined, so do not rely
+          //   on their contents after an error.
+          FD_ZERO(&rfd);
+          FD_SET(mon_pipe[0], &rfd);
+          sel_tv.tv_sec = 1;
+          sel_tv.tv_usec = 100000;
+        }
+        if (local_errno == EINTR) continue;
+
         log_println(4, "Failed to read pkt-pair data from C2S flow, "
                     "retcode=%d, reason=%d", msgretvalue, errno);
         snprintf(spds[(*spd_index)++],
@@ -690,12 +701,11 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
                  sizeof(spds[*spd_index]),
                  " -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0.0 0 0 0 0 0 -1");
         break;
-      }
-      /* There is something to read, so get it from the pktpair child.  If an interrupt occurs,
-       * just skip the read and go on
-       * RAC 2/8/10
-       */
-      if (msgretvalue > 0) {
+      } else {
+        /* There is something to read, so get it from the pktpair child.  If an interrupt occurs,
+         * just skip the read and go on
+         * RAC 2/8/10
+         */
         if ((msgretvalue = read(mon_pipe[0], spds[*spd_index],
                                 sizeof(spds[*spd_index]))) < 0) {
           snprintf(
