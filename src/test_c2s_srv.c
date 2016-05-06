@@ -723,7 +723,7 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
           sel_tv.tv_usec = 100000;
         }
         if (local_errno == EINTR) continue;
-
+        // Either a timeout or an error that wasn't EINTR...
         log_println(4, "Failed to read pkt-pair data from C2S flow, "
                     "retcode=%d, reason=%d", msgretvalue, errno);
         snprintf(spds[(*spd_index)++],
@@ -764,6 +764,7 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
   //  Close opened resources for packet capture
   if (packet_trace_running) {
     stop_packet_trace(mon_pipe);
+    packet_trace_running = 0;
   }
 
   // log end of C->S test
