@@ -180,6 +180,17 @@ void drain_old_clients(Connection* c2s_conns, int streamsNum, char* buff, size_t
   }
 }
 
+/* Makes the passed-in file descriptor into one that will not block.
+ * @param fd the file descriptor
+ * @returns non-zero if successful, zero on failure with errno as set by fcntl.
+ */
+int make_non_blocking(int fd) {
+  int flags;
+  flags = fcntl(fd, F_GETFL, NULL);
+  if (flags == -1) return 0;
+  return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
 // How long to sleep to avoid a race condition.  This is a bad hack.
 // At 150k tests per day, this one sleep(2) wastes 83 hours of peoples'
 // lives every day.
@@ -542,6 +553,13 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
                   meta.c2s_ndttrace);
     } else {
       log_println(0, "Packet trace was unable to be created");
+      // Attempt to shut down the trace, but make sure that all attempts to
+      // write to the pipe will never block.
+      if (make_non_blocking(mon_pipe)) {
+        stop_packet_trace(mon_pipe);
+      } else {
+        log_println(0, "Couldn't make pipe non-blocking (errno=%d) and so was unable to safely call stop_packet_trace", errno);
+      }
     }
   }
 
