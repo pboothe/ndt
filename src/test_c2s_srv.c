@@ -23,7 +23,7 @@
 #include "jsonutils.h"
 #include "websocket.h"
 
-/** 
+/**
  * Use read or SSL_read in their raw forms. We want this to go as fast
  * as possible and we do not care about the contents of buff.
  * @param conn The Connection to use
@@ -555,10 +555,13 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
       log_println(0, "Packet trace was unable to be created");
       // Attempt to shut down the trace, but make sure that all attempts to
       // write to the pipe will never block.
-      if (make_non_blocking(mon_pipe)) {
+      if (make_non_blocking(mon_pipe[1]) && make_non_blocking(mon_pipe[0])) {
         stop_packet_trace(mon_pipe);
       } else {
-        log_println(0, "Couldn't make pipe non-blocking (errno=%d) and so was unable to safely call stop_packet_trace", errno);
+        log_println(0,
+                    "Couldn't make pipe non-blocking (errno=%d) and so was "
+                    "unable to safely call stop_packet_trace",
+                    errno);
       }
     }
   }
@@ -706,15 +709,14 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
     i = 0;
 
     for (;;) {
-      msgretvalue = select(mon_pipe[0] + 1, &rfd, NULL, NULL,
-                           &sel_tv);
+      msgretvalue = select(mon_pipe[0] + 1, &rfd, NULL, NULL, &sel_tv);
       if (msgretvalue <= 0) {
         // Save a copy of errno in case FD_ functions change it.
         local_errno = (msgretvalue == -1) ? errno : 0;
         if (local_errno != 0) {
           // From the select() man page:
-          //   On error ... the sets and timeout become undefined, so do not rely
-          //   on their contents after an error.
+          //   On error ... the sets and timeout become undefined, so do not
+          //   rely on their contents after an error.
           FD_ZERO(&rfd);
           FD_SET(mon_pipe[0], &rfd);
           sel_tv.tv_sec = 1;
@@ -732,8 +734,8 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
                  " -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0.0 0 0 0 0 0 -1");
         break;
       } else {
-        /* There is something to read, so get it from the pktpair child.  If an interrupt occurs,
-         * just skip the read and go on
+        /* There is something to read, so get it from the pktpair child.  If an
+         * interrupt occurs, just skip the read and go on
          * RAC 2/8/10
          */
         if ((msgretvalue = read(mon_pipe[0], spds[*spd_index],
