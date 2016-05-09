@@ -180,7 +180,7 @@ void drain_old_clients(Connection* c2s_conns, int streamsNum, char* buff, size_t
   }
 }
 
-/* Makes the passed-in file descriptor into one that will not block.
+/** Makes the passed-in file descriptor into one that will not block.
  * @param fd the file descriptor
  * @returns non-zero if successful, zero on failure with errno as set by fcntl.
  */
@@ -189,6 +189,39 @@ int make_non_blocking(int fd) {
   flags = fcntl(fd, F_GETFL, NULL);
   if (flags == -1) return 0;
   return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+/** Attempts to use the pipe to shutdown packet tracing. Will not block. After
+ * this function the file descriptors of the pipe are likely set to
+ * non-blocking. This should not affect any code because any shutdown messages
+ * sent should be the last usage of the pipe anyway.
+ * @param mon_pipe the pipe to send on which to send shutdown messages.
+ */
+void packet_trace_emergency_shutdown(int *mon_pipe) {
+  // Attempt to shut down the trace, but only after making sure that all
+  // attempts to write to the pipe will never block.
+  if (make_non_blocking(mon_pipe[1]) && make_non_blocking(mon_pipe[0])) {
+    stop_packet_trace(mon_pipe);
+  } else {
+    log_println(0,
+                "Couldn't make pipe non-blocking (errno=%d) and so was "
+                "unable to safely call stop_packet_trace",
+                errno);
+  }
+}
+
+/** Waits up to one second for the passed-in fd to become readable.
+ * @param fd the file descriptor to wait for
+ * @returns true if the fd is readable, false otherwise
+ */
+int wait_for_readable_fd(int fd) {
+  fd_set rfd;
+  struct timeval sel_tv;
+  FD_ZERO(&rfd);
+  FD_SET(fd, &rfd);
+  memset(&sel_tv, 0, sizeof(sel_tv));
+  sel_tv.tv_sec = 1;  // Wait for up to 1 second
+  return (1 == select(fd + 1, &rfd, NULL, NULL, &sel_tv));
 }
 
 // How long to sleep to avoid a race condition.  This is a bad hack.
@@ -529,15 +562,10 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
       }
     }
 
-    // Get data collected from packet tracing into the C2S "ndttrace" file
-    FD_ZERO(&rfd);
-    FD_SET(mon_pipe[0], &rfd);
-    memset(&sel_tv, 0, sizeof(sel_tv));
-    sel_tv.tv_sec = 1;  // Wait for up to 1 second for the trace to start.
-    msgretvalue = select(mon_pipe[0] + 1, &rfd, NULL, NULL, &sel_tv);
-    packet_trace_running = (msgretvalue == 1);
+    packet_trace_running = wait_for_readable_fd(mon_pipe[0]);
 
     if (packet_trace_running) {
+      // Get data collected from packet tracing into the C2S "ndttrace" file
       memset(tmpstr, 0, 256);
       for (i = 0; i < 5; i++) {
         msgretvalue = read(mon_pipe[0], tmpstr, 128);
@@ -553,16 +581,7 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
                   meta.c2s_ndttrace);
     } else {
       log_println(0, "Packet trace was unable to be created");
-      // Attempt to shut down the trace, but make sure that all attempts to
-      // write to the pipe will never block.
-      if (make_non_blocking(mon_pipe[1]) && make_non_blocking(mon_pipe[0])) {
-        stop_packet_trace(mon_pipe);
-      } else {
-        log_println(0,
-                    "Couldn't make pipe non-blocking (errno=%d) and so was "
-                    "unable to safely call stop_packet_trace",
-                    errno);
-      }
+      packet_trace_emergency_shutdown(mon_pipe);
     }
   }
 
@@ -695,37 +714,25 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
   close_all_connections(c2s_conns, streamsNum);
   close(testOptions->c2ssockfd);
 
-  // Next, send speed-chk a flag to retrieve the data it collected.
-  // Skip this step if speed-chk isn't running.
   if (packet_trace_running) {
     log_println(1, "Signal USR1(%d) sent to child [%d]", SIGUSR1,
                 c2s_childpid);
     testOptions->child1 = c2s_childpid;
     kill(c2s_childpid, SIGUSR1);
-    FD_ZERO(&rfd);
-    FD_SET(mon_pipe[0], &rfd);
-    sel_tv.tv_sec = 1;
-    sel_tv.tv_usec = 100000;
     i = 0;
 
     for (;;) {
+      FD_ZERO(&rfd);
+      FD_SET(mon_pipe[0], &rfd);
+      sel_tv.tv_sec = 1;
+      sel_tv.tv_usec = 100000;
       msgretvalue = select(mon_pipe[0] + 1, &rfd, NULL, NULL, &sel_tv);
       if (msgretvalue <= 0) {
-        // Save a copy of errno in case FD_ functions change it.
         local_errno = (msgretvalue == -1) ? errno : 0;
-        if (local_errno != 0) {
-          // From the select() man page:
-          //   On error ... the sets and timeout become undefined, so do not
-          //   rely on their contents after an error.
-          FD_ZERO(&rfd);
-          FD_SET(mon_pipe[0], &rfd);
-          sel_tv.tv_sec = 1;
-          sel_tv.tv_usec = 100000;
-        }
         if (local_errno == EINTR) continue;
         // Either a timeout or an error that wasn't EINTR...
         log_println(4, "Failed to read pkt-pair data from C2S flow, "
-                    "retcode=%d, reason=%d", msgretvalue, errno);
+                    "retcode=%d, reason=%d", msgretvalue, local_errno);
         snprintf(spds[(*spd_index)++],
                  sizeof(spds[*spd_index]),
                  " -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0.0 0 0 0 0 0 -1");
@@ -748,11 +755,7 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
         log_println(1, "%d bytes read '%s' from C2S monitor pipe",
                     msgretvalue, spds[*spd_index]);
         (*spd_index)++;
-        if (i++ == 1)
-          break;
-        sel_tv.tv_sec = 1;
-        sel_tv.tv_usec = 100000;
-        continue;
+        if (i++ == 1) break;
       }
     }
   }
