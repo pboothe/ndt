@@ -195,7 +195,7 @@ int make_non_blocking(int fd) {
  * this function the file descriptors of the pipe are likely set to
  * non-blocking. This should not affect any code because any shutdown messages
  * sent should be the last usage of the pipe anyway.
- * @param mon_pipe the pipe to send on which to send shutdown messages.
+ * @param mon_pipe the pipe on which to send shutdown messages.
  */
 void packet_trace_emergency_shutdown(int *mon_pipe) {
   // Attempt to shut down the trace, but only after making sure that all
@@ -215,11 +215,9 @@ void packet_trace_emergency_shutdown(int *mon_pipe) {
  * @returns true if the fd is readable, false otherwise
  */
 int wait_for_readable_fd(int fd) {
-  fd_set rfd;
-  struct timeval sel_tv;
-  FD_ZERO(&rfd);
+  fd_set rfd = {0};
+  struct timeval sel_tv = {0};
   FD_SET(fd, &rfd);
-  memset(&sel_tv, 0, sizeof(sel_tv));
   sel_tv.tv_sec = 1;  // Wait for up to 1 second
   return (1 == select(fd + 1, &rfd, NULL, NULL, &sel_tv));
 }
@@ -766,6 +764,9 @@ int test_c2s(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
 
   //  Close opened resources for packet capture
   if (packet_trace_running) {
+    // TODO: Determine whether this shutdown can be performed in a non-blocking
+    // manner, and if so then refactor packet_trace_emergency_shutdown to have
+    // better error handling and use that refactored and renamed function here.
     stop_packet_trace(mon_pipe);
     packet_trace_running = 0;
   }
