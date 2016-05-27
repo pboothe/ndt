@@ -16,6 +16,7 @@
 #include "ndtptestconstants.h"
 #include "utils.h"
 #include "testoptions.h"
+#include "testutils.h"
 #include "runningtest.h"
 #include "logging.h"
 #include "protocol.h"
@@ -158,6 +159,8 @@ int test_s2c(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
   enum TEST_STATUS_INT teststatuses = TEST_NOT_STARTED;
   enum TEST_ID testids = extended ? S2C_EXT : S2C;
   char snaplogsuffix[256] = "s2c_snaplog";
+
+  int packet_trace_running = 0;
 
   memset(xmitsfd, 0, sizeof(xmitsfd));
   for (i = 0; i < MAX_STREAMS; i++) {
@@ -393,19 +396,25 @@ int test_s2c(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
             log_println(0, "S2C test error: can't create child process.");
           }
         }
-        memset(tmpstr, 0, 256);
-        for (i = 0; i < 5; i++) {  // read nettrace file name into "tmpstr"
-          ret = read(mon_pipe[0], tmpstr, 128);
-          // socket interrupted, try reading again
-          if ((ret == -1) && (errno == EINTR))
-            continue;
-          break;
-        }
+        packet_trace_running = wait_for_readable_fd(mon_pipe[0]);
+        if (packet_trace_running) {
+          memset(tmpstr, 0, 256);
+          for (i = 0; i < 5; i++) {  // read nettrace file name into "tmpstr"
+            ret = read(mon_pipe[0], tmpstr, 128);
+            // socket interrupted, try reading again
+            if ((ret == -1) && (errno == EINTR))
+              continue;
+            break;
+          }
 
-        if (strlen(tmpstr) > 5)
-          memcpy(meta.s2c_ndttrace, tmpstr, strlen(tmpstr));
-        // name of nettrace file passed back from pcap child copied into meta
-        // structure
+          if (strlen(tmpstr) > 5)
+            memcpy(meta.s2c_ndttrace, tmpstr, strlen(tmpstr));
+          // name of nettrace file passed back from pcap child copied into meta
+          // structure
+        } else {
+          log_println(0, "Packet trace was unable to be created");
+          packet_trace_emergency_shutdown(mon_pipe);
+        }
       }
 
       /* experimental code, delete when finished */
@@ -645,7 +654,7 @@ int test_s2c(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
        * Skip this step if speed-chk isn't running.
        */
 
-      if (getuid() == 0) {
+      if (packet_trace_running) {
         log_println(1, "Signal USR2(%d) sent to child [%d]", SIGUSR2,
                     s2c_childpid);
         testOptions->child2 = s2c_childpid;
@@ -807,7 +816,7 @@ int test_s2c(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
                   "S2C test - failed to send finalize message to pid=%d",
                   s2c_childpid);
 
-    if (getuid() == 0) {
+    if (packet_trace_running) {
       stop_packet_trace(mon_pipe);
     }
 
