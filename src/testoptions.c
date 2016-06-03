@@ -277,7 +277,7 @@ int initialize_tests(Connection *ctl, TestOptions *options, char *buff,
   // char remhostarr[256], protologlocalarr[256];
   // char *remhost_ptr = get_remotehost();
 
-  assert(ctl.socket != -1);
+  assert(ctl->socket != -1);
   assert(options);
 
   memset(options->client_version, 0, sizeof(options->client_version));

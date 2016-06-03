@@ -664,7 +664,7 @@ int run_test(tcp_stat_agent *agent, Connection *ctl, TestOptions *testopt,
 
   // int n;  // temporary iterator variable --// commented out -> calc_linkspeed
   struct tcp_vars vars[MAX_STREAMS];
-  struct throughputSnapshot *s2c_ThroughputSnapshots, *c2s_ThroughputSnapshots;
+  struct throughputSnapshot *s2c_ThroughputSnapshots = NULL, *c2s_ThroughputSnapshots = NULL;
 
   int link = CANNOT_DETERMINE_LINK;  // local temporary variable indicative of
   // link speed. Transmitted but unused at client end , which has a similar
