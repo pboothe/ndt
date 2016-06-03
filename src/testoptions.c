@@ -132,8 +132,8 @@ snapWorker(void* arg) {
   while (1) {
     pthread_mutex_lock(&mainmutex);
     if (workerLoop) {
-      pthread_mutex_unlock(&mainmutex);
       pthread_cond_broadcast(&maincond);
+      pthread_mutex_unlock(&mainmutex);
       break;
     }
     pthread_mutex_unlock(&mainmutex);
