@@ -126,6 +126,7 @@ int test_s2c(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
   pid_t s2c_childpid = 0;  // s2c_childpid
 
   char tmpstr[256];  // string array used for temp storage of many char*
+  size_t tmpstr_len = 0;
   struct sockaddr_storage cli_addr[MAX_STREAMS];
   struct throughputSnapshot *lastThroughputSnapshot;
 
@@ -396,19 +397,27 @@ int test_s2c(Connection *ctl, tcp_stat_agent *agent, TestOptions *testOptions,
             log_println(0, "S2C test error: can't create child process.");
           }
         }
+
         packet_trace_running = wait_for_readable_fd(mon_pipe[0]);
         if (packet_trace_running) {
           memset(tmpstr, 0, 256);
+          tmpstr_len = 0;
           for (i = 0; i < 5; i++) {  // read nettrace file name into "tmpstr"
             ret = read(mon_pipe[0], tmpstr, 128);
             // socket interrupted, try reading again
-            if ((ret == -1) && (errno == EINTR))
+            if ((ret == -1) && (errno == EINTR)) {
               continue;
+            } else if (ret == 128) { 
+              tmpstr[127] = '\0';  // ensure the string is well-terminated.
+              tmpstr_len = 128;
+            } else if (ret > 0) {
+              tmpstr_len = ret;
+            }
             break;
           }
 
-          if (strlen(tmpstr) > 5)
-            memcpy(meta.s2c_ndttrace, tmpstr, strlen(tmpstr));
+          if (tmpstr_len > 5)
+            memcpy(meta.s2c_ndttrace, tmpstr, tmpstr_len);
           // name of nettrace file passed back from pcap child copied into meta
           // structure
         } else {
