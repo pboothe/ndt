@@ -1603,10 +1603,16 @@ ndtchild *spawn_new_child(int listenfd, SSL_CTX *ssl_context) {
   size_t rmt_host_strlen;
   ndtchild *new_child = NULL;
   int accept_errno;
-  // Accept the connection, initialize variables, fire up the new child.
-  // Set up connection channel to the new child
-  if (pipe(child_pipe) == -1) {
-    log_println(6, "pipe() failed errno=%d", errno);
+  int pipe_success;
+  // Fire up the new child, accept the connection, initialize variables.
+  // Set up communication channel to the new child
+  do {
+    pipe_success = pipe(child_pipe);
+  } while (pipe_success == -1 && errno == EINTR);
+  if (pipe_success == -1) {
+    log_println(0, "CHILD COULD NOT SPAWN: pipe() failed errno=%d", errno);
+    // Accept the incoming connection to prevent listenfd from queueing
+    ctlsockfd = accept(listenfd, (struct sockaddr *)&cli_addr, &cli_addr_len);
     close(ctlsockfd);
     return NULL;
   }
@@ -1614,10 +1620,13 @@ ndtchild *spawn_new_child(int listenfd, SSL_CTX *ssl_context) {
   child_pid = fork();
   if (child_pid == -1) {
     // An error occurred, log it and return.
-    log_println(0, "fork() failed, errno = %d (%s)", errno, strerror(errno));
+    log_println(0, "CHILD COULD NOT SPAWN: fork() failed, errno = %d (%s)",
+                errno, strerror(errno));
+    // Accept the incoming connection to prevent listenfd from queueing
+    ctlsockfd = accept(listenfd, (struct sockaddr *)&cli_addr, &cli_addr_len);
+    close(ctlsockfd);
     close(child_pipe[0]);
     close(child_pipe[1]);
-    close(ctlsockfd);
     return NULL;
   } else if (child_pid == 0) {
     // This is the child. Clean up and close the resources the child does not
@@ -1685,7 +1694,6 @@ ndtchild *spawn_new_child(int listenfd, SSL_CTX *ssl_context) {
 
   // Close the open resources that should only be used by the child.
   close(child_pipe[0]);
-  close(ctlsockfd);
 
   // Initialize the members of new_child
   new_child = (ndtchild *)calloc(1, sizeof(ndtchild));

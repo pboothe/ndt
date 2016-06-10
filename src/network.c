@@ -790,8 +790,7 @@ void close_connection(Connection *conn) {
  * @return 0 or an error code
  */
 int setup_SSL_connection(Connection *conn, SSL_CTX *ctx) {
-  char ssl_error[255];
-  unsigned long ssl_err;
+  int ssl_err;
   conn->ssl = SSL_new(ctx);
   if (conn->ssl == NULL) {
     log_println(4, "SSL_new failed");
@@ -803,8 +802,8 @@ int setup_SSL_connection(Connection *conn, SSL_CTX *ctx) {
   }
   if ((ssl_err = SSL_accept(conn->ssl)) != 1) {
     ssl_err = SSL_get_error(conn->ssl, ssl_err);
-    log_println(4, "SSL_accept failed: %s (%d)", ssl_error_str(ssl_error),
-                ssl_error);
+    log_println(4, "SSL_accept failed: %s (%d)", ssl_error_str(ssl_err),
+                ssl_err);
     return EIO;
   }
   return 0;
