@@ -10,6 +10,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "network_clt.h"
 #include "network.h"
 #include "usage.h"
 #include "logging.h"
@@ -138,7 +139,7 @@ void testResults(char tests, char *testresult_str, char* host) {
 
   // If the S2C test was not performed, just interpret the C2S and SFW test
   // results
-  if (!(tests & TEST_S2C)) {
+  if (!(tests & (TEST_S2C | TEST_S2C_EXT))) {
     if (tests & (TEST_C2S | TEST_C2S_EXT)) {  // Was C2S test performed?
       check_C2Spacketqueuing(c2sspd, spdout, sndqueue, pkts, lth);
     }
@@ -187,7 +188,7 @@ void testResults(char tests, char *testresult_str, char* host) {
     if (tests & (TEST_C2S | TEST_C2S_EXT)) {
       check_C2Spacketqueuing(c2sspd, spdout, sndqueue, pkts, lth);
     }
-    if (tests & TEST_S2C) {
+    if (tests & (TEST_S2C | TEST_S2C_EXT)) {
       check_S2Cpacketqueuing(s2cspd, spdin, ssndqueue, sbytes);
     }
 
@@ -913,7 +914,15 @@ int main(int argc, char *argv[]) {
     log_println(0, "Malloc failed!");
     exit(6);
   }
-  ptr = strtok_r(buff, " ", &strtokbuf);
+
+  // if the server does not support extended tests it can send an invalid test sequence
+  // (redundant number at the beginning)
+  if (((tests & TEST_C2S_EXT) && !strstr(buff, "64"))
+       || ((tests & TEST_S2C_EXT) && !strstr(buff, "128"))) {
+    ptr = strtok_r(buff, " ", &strtokbuf);
+    ptr = strtok_r(NULL, " ", &strtokbuf);
+  } else
+    ptr = strtok_r(buff, " ", &strtokbuf);
 
   // Run all tests requested, based on the ID.
   while (ptr) {

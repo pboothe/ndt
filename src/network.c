@@ -8,6 +8,8 @@
 
 #include <assert.h>
 #include <netdb.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <string.h>
 #include <unistd.h>
 #include "jsonutils.h"
@@ -191,7 +193,7 @@ I2Addr CreateListenSocket(I2Addr addr, char* serv, int options, int buf_size) {
   optlen = sizeof(set_size);
   // get send buffer size
   getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &set_size, &optlen);
-  log_print(5, "\nSend buffer initialized to %d, ", set_size);
+  log_println(5, "Send buffer initialized to %d, ", set_size);
 
   // get receive buffer size
   getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &set_size, &optlen);
@@ -370,8 +372,8 @@ int CreateConnectSocket(int* sockfd, I2Addr local_addr, I2Addr server_addr,
 }
 
 /**
- * Converts message to JSON format and sends it to the control socket.
- * @param ctlSocket control socket
+ * Converts message to JSON format and sends it to the control Connection.
+ * @param ctl control Connection
  * @param type type of the message
  * @param msg message to send
  * @param len length of the message
@@ -405,18 +407,18 @@ int CreateConnectSocket(int* sockfd, I2Addr local_addr, I2Addr server_addr,
  *        -4 - Cannot convert msg to JSON
  *
  */
-int send_json_msg(int ctlSocket, int type, const char* msg, int len,
-                  int connectionFlags, int jsonConvertType,
-                  const char *keys, const char *keysDelimiters,
-                  const char *values, char *valuesDelimiters) {
+int send_json_msg_any(Connection* ctl, int type, const char* msg, int len,
+                      int connectionFlags, int jsonConvertType,
+                      const char *keys, const char *keysDelimiters,
+                      const char *values, char *valuesDelimiters) {
   char* tempBuff;
   int ret = 0;
   // if JSON is not supported by second side, sends msg as it is
   if (!(connectionFlags & JSON_SUPPORT)) {
     if (connectionFlags & WEBSOCKET_SUPPORT) {
-      return send_websocket_msg(ctlSocket, type, msg, len);
+      return send_websocket_msg(ctl, type, msg, len);
     } else {
-      return send_msg(ctlSocket, type, msg, len);
+      return send_msg_any(ctl, type, msg, len);
     }
   }
 
@@ -430,9 +432,9 @@ int send_json_msg(int ctlSocket, int type, const char* msg, int len,
       tempBuff = json_create_from_key_value_pairs(msg); break;
     default:
       if (connectionFlags & WEBSOCKET_SUPPORT) {
-        return send_websocket_msg(ctlSocket, type, msg, len);
+        return send_websocket_msg(ctl, type, msg, len);
       } else {
-        return send_msg(ctlSocket, type, msg, len);
+        return send_msg_any(ctl, type, msg, len);
       }
   }
 
@@ -440,9 +442,9 @@ int send_json_msg(int ctlSocket, int type, const char* msg, int len,
     return -4;
   }
   if (connectionFlags & WEBSOCKET_SUPPORT) {
-    ret = send_websocket_msg(ctlSocket, type, tempBuff, strlen(tempBuff));
+    ret = send_websocket_msg(ctl, type, tempBuff, strlen(tempBuff));
   } else {
-    ret = send_msg(ctlSocket, type, tempBuff, strlen(tempBuff));
+    ret = send_msg_any(ctl, type, tempBuff, strlen(tempBuff));
   }
   free(tempBuff);
   return ret;
@@ -452,27 +454,22 @@ int send_json_msg(int ctlSocket, int type, const char* msg, int len,
  * Shortest version of send_json_msg method. Uses default NULL values for
  * JSON_MULTIPLE_VALUES convert type specific parameters.
  */
-int send_json_message(int ctlSocket, int type, const char* msg, int len,
+int send_json_message_any(Connection* ctl, int type, const char* msg, int len,
                       int connectionFlags, int jsonConvertType) {
-  return send_json_msg(ctlSocket, type, msg, len, connectionFlags, jsonConvertType,
-                       NULL, NULL, NULL, NULL);
+  return send_json_msg_any(ctl, type, msg, len, connectionFlags, jsonConvertType,
+                           NULL, NULL, NULL, NULL);
 }
 
 /**
- * Sends the protocol message to the control socket.
- * @param ctlSocket control socket
+ * Sends the protocol message to the control connection.
+ * @param ctl control Connection
  * @param type type of the message
  * @param msg message to send
  * @param len length of the message
- * @return 0 on success, error code otherwise
- *        Error codes:
- *        -1 - Cannot write to socket at all
- *        -2 - Cannot complete writing full message data into socket
- *        -3 - Cannot write after retries
+ * @return 0 on success, -1 otherwise
  */
-int send_msg(int ctlSocket, int type, const void* msg, int len) {
+int send_msg_any(Connection* ctl, int type, const void* msg, int len) {
   unsigned char buff[3];
-  int rc, i;
 
   assert(msg);
   assert(len >= 0);
@@ -483,47 +480,22 @@ int send_msg(int ctlSocket, int type, const void* msg, int len) {
   buff[1] = len >> 8;
   buff[2] = len;
 
-  // retry sending data 5 times
-  for (i = 0; i < 5; i++) {
-    // Write initial data about length and type to socket
-    rc = writen(ctlSocket, buff, 3);
-    if (rc == 3)  // write completed
-      break;
-    if (rc == 0)  // nothing written yet,
-      continue;
-    if (rc == -1)  // error writing to socket..cannot continue
-      return -1;
-  }
-
-  // Exceeded retries, return as "failed trying to write"
-  if (i == 5)
-    return -3;
+  // Write initial data about length and type to socket
+  if (writen_any(ctl, buff, 3) != 3) return -1;
 
   // Now write the actual message
-  for (i = 0; i < 5; i++) {
-    rc = writen(ctlSocket, msg, len);
-    // all the data has been written successfully
-    if (rc == len)
-      break;
-    // data writing not complete, continue
-    if (rc == 0)
-      continue;
-    if (rc == -1)  // error writing to socket, cannot continue writing data
-      return -2;
-  }
-  if (i == 5)
-    return -3;
+  if (writen_any(ctl, msg, len) != len) return -1;
   log_println(8, ">>> send_msg: type=%d, len=%d, msg=%s, pid=%d", type, len,
               msg, getpid());
 
-  protolog_sendprintln(type, msg, len, getpid(), ctlSocket);
+  protolog_sendprintln(type, msg, len, getpid(), ctl->socket);
 
   return 0;
 }
 
 /**
  * Receive the protocol message from the control socket.
- * @param ctlSocket control socket
+ * @param ctl control Connection
  * @param type target place for type of the message
  * @param msg target place for the message body
  * @param len target place for the length of the message
@@ -533,7 +505,7 @@ int send_msg(int ctlSocket, int type, const void* msg, int len) {
  *          -2 : No of bytes received were lesser than expected byte count
  *          -3 : No of bytes received did not match expected byte count
  */
-int recv_msg(int ctlSocket, int* type, void* msg, int* len) {
+int recv_msg_any(Connection* ctl, int* type, void* msg, int* len) {
   unsigned char buff[3];
   int length;
   char *msgtemp = (char*) msg;
@@ -543,7 +515,7 @@ int recv_msg(int ctlSocket, int* type, void* msg, int* len) {
   assert(len);
 
   // if 3 bytes are not explicitly read, signal error
-  if (readn(ctlSocket, buff, 3) != 3) {
+  if (readn_any(ctl, buff, 3) != 3) {
     return -1;
   }
 
@@ -559,110 +531,280 @@ int recv_msg(int ctlSocket, int* type, void* msg, int* len) {
     return -2;
   }
   *len = length;
-  if (readn(ctlSocket, msg, length) != length) {
+  if (readn_any(ctl, msg, length) != length) {
     return -3;
   }
   log_println(8, "<<< recv_msg: type=%d, len=%d", *type, *len);
 
-  protolog_rcvprintln(*type, msgtemp, *len, getpid(), ctlSocket);
+  protolog_rcvprintln(*type, msgtemp, *len, getpid(), ctl->socket);
 
   return 0;
 }
 
-int recv_any_msg(int ctlSocket, int* type, void* msg, int* len,
+int recv_any_msg(Connection* conn, int* type, void* msg, int* len,
                  int connectionFlags) {
   if (connectionFlags & WEBSOCKET_SUPPORT) {
-    return recv_websocket_ndt_msg(ctlSocket, type, msg, len);
+    return recv_websocket_ndt_msg(conn, type, msg, len);
   } else {
-    return recv_msg(ctlSocket, type, msg, len);
+    return recv_msg_any(conn, type, msg, len);
   }
 }
 
 /**
- * Write the given amount of data to the file descriptor.
- * @param fd the file descriptor
+ * Translates a numerical SSL error into a string.
+ * @param ssl_err the SSL error
+ * @return a char* with a string explaining the error code
+ */
+const char* ssl_error_str(int ssl_err) {
+  switch (ssl_err) {
+    case SSL_ERROR_NONE:
+      return "No error occurred. Why was this called?";
+    case SSL_ERROR_ZERO_RETURN:
+      return "SSL_ERROR_ZERO_RETURN";
+    case SSL_ERROR_WANT_READ:
+      return "SSL_ERROR_WANT_READ (socket was not readable)";
+    case SSL_ERROR_WANT_WRITE:
+      return "SSL_ERROR_WANT_WRITE (socket was not writeable)";
+    case SSL_ERROR_WANT_CONNECT:
+      return "SSL_ERROR_WANT_CONNECT";
+    case SSL_ERROR_WANT_ACCEPT:
+      return "SSL_ERROR_WANT_ACCEPT";
+    case SSL_ERROR_WANT_X509_LOOKUP:
+      return "SSL_ERROR_WANT_X509_LOOKUP";
+    //case SSL_ERROR_WANT_ASYNC:
+      //return "SSL_ERROR_WANT_ASYNC";
+    //case SSL_ERROR_WANT_ASYNC_JOB:
+      //return "SSL_ERROR_WANT_ASYNC_JOB";
+    case SSL_ERROR_SYSCALL:
+      return "SSL_ERROR_SYSCALL";
+    case SSL_ERROR_SSL:
+      return "SSL_ERROR_SSL";
+    default:
+      return "UKNOWN_SSL_ERROR (this should never happen)";
+  }
+}
+
+/**
+ * Try a single write to a socket.
+ * @param socketfd The socket
+ * @param buf The data
+ * @param amount The data size
+ * @return The number of bytes written, -1 on fatal error, and 0 on recoverable
+ *         error.
+ */
+int write_raw(int socketfd, const char* buf, int amount) {
+  int n;
+  n = write(socketfd, buf, amount);
+  if (n == -1) {
+    if (errno == EINTR || errno == EAGAIN) {
+      // Recoverable errors
+      return 0;
+    } else {
+      // Everything else is unrecoverable
+      log_println(6,
+                  "write_raw() Error! write(%d) failed with err=%s (%d) pid=%d",
+                  socketfd, strerror(errno), errno, getpid());
+      return -1;
+    }
+  } else {
+    // Success!
+    return n;
+  }
+}
+
+/**
+ * Try a single SSL_write to a socket.
+ * @param ssl The ssl connection
+ * @param buf The data
+ * @param amount The data size
+ * @return The number of bytes written, -1 on fatal error, and 0 on recoverable
+ *         error.
+ */
+int write_ssl(SSL* ssl, const char* buf, int amount) {
+  int n, ssl_error;
+  n = SSL_write(ssl, buf, amount);
+  if (n == 0) {
+    // 0 represents fatal errors for SSL_write
+    log_println(6, "write_ssl() Error! SSL_write() failed unrecoverably pid=%d",
+                getpid());
+    ssl_error = SSL_get_error(ssl, n);
+    log_println(6, "SSL error: %s (%d)", ssl_error_str(ssl_error), ssl_error);
+    return -1;
+  } else if (n < 0) {
+    // Possibly a recoverable error
+    ssl_error = SSL_get_error(ssl, n);
+    // The only recoverable errors
+    if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
+      return 0;
+    } else {
+      log_println(6, "write_ssl() Error! SSL_write() failed with err=%d pid=%d",
+                  ssl_error, getpid());
+      log_println(6, "SSL error: %s (%d)", ssl_error_str(ssl_error), ssl_error);
+      return -1;
+    }
+  } else {
+    // Success!
+    return n;
+  }
+}
+
+/**
+ * Write the given amount of data to the Connection. When this function writes,
+ * it will not return until all data is written, and it is insensitive to
+ * EINTR. This means that when it writes to a bad pipe and gets errno set to
+ * EINTR and then the process receives the SIGPIPE signal, it is incumbent upon
+ * the SIGPIPE handler to exit the process.
+ *
+ * In the context of web100srv, this means that the server main loop should
+ * never call writen, only the child should call writen, and that the signal
+ * handler for SIGPIPE needs to exit() when a child receives SIGPIPE.
+ *
+ * @param conn the Connection
  * @param buf buffer with data to write
  * @param amount the size of the data
- * @return The amount of bytes written to the file descriptor
+ * @return The amount of bytes written to the Connection.
+ *         -1 when it gets an unrecoverable error, just like write().
  */
-
-int writen(int fd, const void* buf, int amount) {
+int writen_any(Connection* conn, const void* buf, int amount) {
   int sent, n;
   const char* ptr = buf;
   sent = 0;
   assert(amount >= 0);
   while (sent < amount) {
-    n = write(fd, ptr + sent, amount - sent);
-    if (n == -1) {
-      if (errno == EINTR)  // interrupted, retry writing again
-        continue;
-      if (errno != EAGAIN) {  // some genuine socket write error
-        log_println(6,
-                    "writen() Error! write(%d) failed with err='%s(%d) pic=%d'",
-                    fd, strerror(errno), errno, getpid());
-        return -1;
-      }
+    if (conn->ssl == NULL) {
+      n = write_raw(conn->socket, ptr + sent, amount - sent);
+    } else {
+      n = write_ssl(conn->ssl, ptr + sent, amount - sent);
     }
-    assert(n != 0);
-    if (n != -1) {  // success writing "n" bytes. Increment total bytes written
-      sent += n;
-    }
+    if (n == -1) return -1;
+    // success writing "n" bytes. Increment total bytes written
+    sent += n;
   }
   return sent;
 }
 
-/**
- * Read the given amount of data from the file descriptor.
- * @param fd the file descriptor
- * @param buf buffer for data
- * @param amount size of the data to read
- * @return The amount of bytes read from the file descriptor
- */
+size_t readn_ssl(SSL *ssl, void *buf, size_t amount) {
+  int received = 0;
+  int ssl_err;
 
-size_t readn(int fd, void* buf, size_t amount) {
-  size_t received = 0;
-  int n, rc;
-  char* ptr = buf;
-  struct timeval sel_tv;
-  fd_set rfd;
-
-  assert(amount >= 0);
-
-  FD_ZERO(&rfd);  // initialize with zeroes
-  FD_SET(fd, &rfd);
-  sel_tv.tv_sec = 600;
-  sel_tv.tv_usec = 0;
-
-  /* modified readn() routine 11/26/09 - RAC
-   * addedd in select() call, to timeout if no read occurs after 10 seconds of waiting.
-   * This should fix a bug where the server hangs at it looks like it's in this read
-   * state.  The select() should check to see if there is anything to read on this socket.
-   * if not, and the 3 second timer goes off, exit out and clean up.
-   */
-  while (received < amount) {
-    // check if fd+1 socket is ready to be read
-    rc = select(fd + 1, &rfd, NULL, NULL, &sel_tv);
-    if (rc == 0) {
-      /* A timeout occurred, nothing to read from socket after 3 seconds */
-      log_println(6, "readn() routine timeout occurred, return error signal "
-                  "and kill off child");
-      return received;
+  received = SSL_read(ssl, buf, amount);
+  if (received <= 0) {
+    ssl_err = SSL_get_error(ssl, received);
+    // received < 0 represents a possibly recoverable error
+    if (received < 0) {
+      if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
+        return 0;
+      }
     }
-    if ((rc == -1) && (errno == EINTR)) /* a signal was processed, ignore it */
-      continue;
-    n = read(fd, ptr + received, amount - received);
-    if (n == -1) {  // error
-      if (errno == EINTR)  // interrupted , try reading again
-        continue;
-      if (errno != EAGAIN)  // genuine socket read error, return
-        return -errno;
-    }
-    if (n != -1) {  // if no errors reading, increment data byte count
-      received += n;
-    }
-    if (n == 0)
-      return 0;
+    log_println(2, "SSL_read failed due to %s (%d)\n", ssl_error_str(ssl_err),
+                ssl_err);
+    return -1;
   }
   return received;
 }
 
+/**
+ * Reads from a raw socket.
+ *
+ * @param fd The file descriptor to read from
+ * @param buf The buffer to read into
+ * @param amount The the amount of data that can be read into buf
+ * @return The number of bytes read, or a negative error code.
+ */
+int readn_raw(int fd, void *buf, size_t amount) {
+  ssize_t received = 0;
+  int error;  // A local variable to hold the contents of errno
+  received = read(fd, buf, amount);
+  if (received <= -1) {
+    if ((error = errno) == EINTR) {
+      return 0;
+    } else {
+      // An unrecoverable error occurred
+      log_println(3, "readn_raw failed: %s (%d)", strerror(error), error);
+      return -error;  // genuine socket error, return
+    }
+  } else if (received == 0) {
+    // read() returning 0 means the fd is at EOF, which is a fatal error here.
+    return -1;
+  } else {
+    return received;
+  }
+}
+
+/**
+ * Read the given amount of data from the Connection.
+ * @param conn The connection to read
+ * @param buf buffer for data
+ * @param amount size of the data to read
+ * @return The amount of bytes read from the Connection
+ */
+size_t readn_any(Connection *conn, void *buf, size_t amount) {
+  assert(amount >= 0);
+  size_t total_read = 0;
+  char *ptr = buf;
+  int received;
+
+  while (total_read < amount) {
+    if (conn->ssl != NULL) {
+      received = readn_ssl(conn->ssl, ptr + total_read, amount - total_read);
+    } else {
+      received = readn_raw(conn->socket, ptr + total_read, amount - total_read);
+    }
+    if (received < 0) return 0;
+    total_read += received;
+  }
+  return total_read;
+}
+
+/**
+ * Shutdown the connection and free any resources associated with it.  After
+ * this, neither this process nor any other process may use the Connection or
+ * its underlying socket and SSL.
+ * @param conn The connection to shutdown
+ */
+void shutdown_connection(Connection *conn) {
+  if (conn->ssl != NULL) {
+    SSL_shutdown(conn->ssl);
+  }
+  SSL_free(conn->ssl);
+  conn->ssl = NULL;
+  shutdown(conn->socket, SHUT_RDWR);
+}
+
+/**
+ * Close the connection and free any resources associated with it.  Will not
+ * shut the connection down - it may still be used by a fork()ed process.
+ * @param conn The connection to close
+ */
+void close_connection(Connection *conn) {
+  SSL_free(conn->ssl);
+  conn->ssl = NULL;
+  close(conn->socket);
+}
+
+/**
+ * Open and set up an SSL connection from a socket connection.
+ * @param conn the Connection to set up.  Should already have its socket set to
+ *             a valid socketfd
+ * @param ctx the SSL context to use for the setup
+ * @return 0 or an error code
+ */
+int setup_SSL_connection(Connection *conn, SSL_CTX *ctx) {
+  int ssl_err;
+  conn->ssl = SSL_new(ctx);
+  if (conn->ssl == NULL) {
+    log_println(4, "SSL_new failed");
+    return ENOMEM;
+  }
+  if (SSL_set_fd(conn->ssl, conn->socket) == 0) {
+    log_println(4, "SSL_set_fd failed");
+    return EIO;
+  }
+  if ((ssl_err = SSL_accept(conn->ssl)) != 1) {
+    ssl_err = SSL_get_error(conn->ssl, ssl_err);
+    log_println(4, "SSL_accept failed: %s (%d)", ssl_error_str(ssl_err),
+                ssl_err);
+    return EIO;
+  }
+  return 0;
+}

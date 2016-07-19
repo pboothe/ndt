@@ -350,8 +350,7 @@ I2ErrHandle get_errhandle() {
  * @param format format of the message
  *            ... - the additional arguments
  */
-
-void log_print(int lvl, const char* format, ...) {
+void log_print_impl(int lvl, const char* format, ...) {
   va_list ap;
 
   if (lvl > _debuglevel) {
@@ -367,17 +366,27 @@ void log_print(int lvl, const char* format, ...) {
  * Log the message with the given level. New line character
  *              is appended to the error stream.
  * @param lvl     level of the message
+ * @param file    filename where the log occurred
+ * @param line    line number in the file
+ * @param lvl     level of the message
  * @param format  format of the message
  *            ... - the additional arguments
  */
 
-void log_println(int lvl, const char* format, ...) {
+void log_println_impl(int lvl, const char* file, int line, const char* format, ...) {
   va_list ap;
+  struct timeval tv;
+  struct tm local_time;
+  char time_string[128];
 
   if (lvl > _debuglevel) {
     return;
   }
-
+  gettimeofday(&tv, NULL);
+  localtime_r(&tv.tv_sec, &local_time);
+  strftime(time_string, sizeof(time_string), "%FT%T", &local_time);
+  log_print_impl(lvl, "[%s.%06ldZ pid=%d loglevel=%d %18s:%-4d] ", time_string,
+                 tv.tv_usec, getpid(), lvl, file, line);
   va_start(ap, format);
   I2ErrLogVT(_errorhandler_nl, -1, 0, format, ap);
   va_end(ap);
@@ -920,6 +929,7 @@ char * get_ISOtime(char *isoTime, int isotimearrsize) {
  * @param compress integer flag indicating whether log file compression
  * 			is enabled
  * @param cputime integer flag indicating if cputime trace logging is on
+ * @param snapshotting integer flag indicating if snapshotting is enabled
  * @param snaplog integer flag indicating if snaplogging is enabled
  * @param tcpdump integer flag indicating if tcpdump trace logging is on
  * @param s2c_ThroughputSnapshots s2c throughput snapshots
@@ -928,14 +938,14 @@ char * get_ISOtime(char *isoTime, int isotimearrsize) {
  * RAC 7/7/09
  */
 
-void writeMeta(int compress, int cputime, int snaplog, int tcpdump,
+void writeMeta(int compress, int cputime, int snapshotting, int snaplog, int tcpdump,
         struct throughputSnapshot *s2c_ThroughputSnapshots, struct throughputSnapshot *c2s_ThroughputSnapshots) {
   FILE * fp;
   char tmpstr[256];
   // char dir[128];
   char dirpathstr[256]="";
   char *tempptr;
-  int ptrdiff = 0;
+  int ptrdiff = 0, i;
 
   // char isoTime[64];
   char filename[256];
@@ -991,25 +1001,29 @@ void writeMeta(int compress, int cputime, int snaplog, int tcpdump,
     log_println(5,
                 "Compression is enabled, compress all files in '%s' basedir",
                 dirpathstr);
-    if (snaplog) {  // if snaplog is enabled, compress those into .gz formats
+    if (snapshotting && snaplog) {  // if snaplog is enabled, compress those into .gz formats
       // Try compressing C->S test snaplogs
       memset(filename, 0, sizeof(filename));
       snprintf(filename, sizeof(filename), "%s/%s", dirpathstr,
                meta.c2s_snaplog);
       if (zlib_def(filename) != 0)
-        log_println(0, "compression failed for file:%s: %s.", filename,
+        log_println(1, "compression failed for file:%s: %s.", filename,
                     dirpathstr);
       else
         strlcat(meta.c2s_snaplog, ".gz", sizeof(meta.c2s_snaplog));
 
       // Try compressing S->C test snaplogs
-      memset(filename, 0, sizeof(filename));
-      snprintf(filename, sizeof(filename), "%s/%s", dirpathstr,
-               meta.s2c_snaplog);
-      if (zlib_def(filename) != 0)
-        log_println(0, "compression failed for file :%s", filename);
-      else
-        strlcat(meta.s2c_snaplog, ".gz", sizeof(meta.s2c_snaplog));
+      for (i = 0; i < MAX_STREAMS; i++) {
+        if (meta.s2c_snaplog[i] && meta.s2c_snaplog[i][0]) {
+          memset(filename, 0, sizeof(filename));
+          snprintf(filename, sizeof(filename), "%s/%s", dirpathstr,
+                   meta.s2c_snaplog[i]);
+          if (zlib_def(filename) != 0)
+            log_println(1, "compression failed for file :%s", filename);
+          else
+            strlcat(meta.s2c_snaplog[i], ".gz", sizeof(meta.s2c_snaplog[i]));
+        }
+      }
     }
 
     // If tcpdump file writing is enabled, compress those
@@ -1020,7 +1034,7 @@ void writeMeta(int compress, int cputime, int snaplog, int tcpdump,
       snprintf(filename, sizeof(filename), "%s/%s", dirpathstr,
                meta.c2s_ndttrace);
       if (zlib_def(filename) != 0)
-        log_println(0, "compression failed for tcpdump file %s =%s",
+        log_println(1, "compression failed for tcpdump file %s =%s",
                     filename, meta.c2s_ndttrace);
       else
         strlcat(meta.c2s_ndttrace, ".gz", sizeof(meta.c2s_ndttrace));
@@ -1030,7 +1044,7 @@ void writeMeta(int compress, int cputime, int snaplog, int tcpdump,
       snprintf(filename, sizeof(filename), "%s/%s", dirpathstr,
                meta.s2c_ndttrace);
       if (zlib_def(filename) != 0)
-        log_println(0, "compression failed for tcpdump file %s =%s",
+        log_println(1, "compression failed for tcpdump file %s =%s",
                     filename, meta.s2c_ndttrace);
       else
         strlcat(meta.s2c_ndttrace, ".gz", sizeof(meta.s2c_ndttrace));
@@ -1041,7 +1055,7 @@ void writeMeta(int compress, int cputime, int snaplog, int tcpdump,
       memset(filename, 0, sizeof(filename));
       snprintf(filename, sizeof(filename), "%s/%s", dirpathstr, meta.CPU_time);
       if (zlib_def(filename) != 0)
-        log_println(0, "compression failed");
+        log_println(1, "compression failed");
       else
         strlcat(meta.CPU_time, ".gz", sizeof(meta.CPU_time));
     } else {
@@ -1062,7 +1076,7 @@ void writeMeta(int compress, int cputime, int snaplog, int tcpdump,
     fprintf(fp, "Date/Time: %s\n", meta.date);
     fprintf(fp, "c2s_snaplog file: %s\n", meta.c2s_snaplog);
     fprintf(fp, "c2s_ndttrace file: %s\n", meta.c2s_ndttrace);
-    fprintf(fp, "s2c_snaplog file: %s\n", meta.s2c_snaplog);
+    fprintf(fp, "s2c_snaplog file: %s\n", meta.s2c_snaplog[0]);
     fprintf(fp, "s2c_ndttrace file: %s\n", meta.s2c_ndttrace);
     fprintf(fp, "cputime file: %s\n", meta.CPU_time);
     fprintf(fp, "web values file: %s\n", meta.web_variables_log);

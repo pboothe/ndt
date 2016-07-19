@@ -79,6 +79,7 @@
 #include <arpa/inet.h>
 #include <I2util/util.h>
 
+#include "connection.h"
 #include "ndtptestconstants.h"
 
 /* move version to configure.ac file for package name */
@@ -112,24 +113,26 @@ typedef struct CwndPeaks {
 
 // Options to run test with
 typedef struct options {
-  u_int32_t limit;              // used to calculate receive window limit
-  int snapDelay;                // frequency of snap log collection in milliseconds (i.e logged every snapDelay ms)
-  char avoidSndBlockUp;         // flag set to indicate avoiding send buffer blocking in the S2C test
-  char snaplog;                 // enable collecting snap log
-  char cwndDecrease;            // enable analysis of the cwnd changes (S2C test)
-  char s2c_logname[256];        // S2C log file name - size changed to 256
-  char c2s_logname[256];        // C2S log file name - size changed to 256
-  int compress;                 // enable compressing log files
-  int c2s_duration;             // upload test duration
-  char c2s_throughputsnaps;     // enable the throughput snapshots for upload test writing
-  int c2s_snapsdelay;           // specify the delay in the throughput snapshots thread for upload test
-  int c2s_snapsoffset;          // specify the initial offset in the throughput snapshots thread for upload test
-  int c2s_streamsnum;           // specify the number of streams (parallel TCP connections) for upload test
-  int s2c_duration;             // download test duration
-  char s2c_throughputsnaps;     // enable the throughput snapshots for download test writing
-  int s2c_snapsdelay;           // specify the delay in the throughput snapshots thread for download test
-  int s2c_snapsoffset;          // specify the initial offset in the throughput snapshots thread for download test
-  int s2c_streamsnum;           // specify the number of streams (parallel TCP connections) for download test
+  u_int32_t limit;                      // used to calculate receive window limit
+  int snapDelay;                        // frequency of snap log collection in milliseconds (i.e logged every snapDelay ms)
+  char avoidSndBlockUp;                 // flag set to indicate avoiding send buffer blocking in the S2C test
+  char snaplog;                         // enable collecting snap log
+  char snapshots;                       // enable snapshotting
+  char cwndDecrease;                    // enable analysis of the cwnd changes (S2C test)
+  char s2c_logname[MAX_STREAMS][256];   // S2C log file name - size changed to 256
+  char c2s_logname[256];                // C2S log file name - size changed to 256
+  int compress;                         // enable compressing log files
+  int c2s_duration;                     // upload test duration
+  char c2s_throughputsnaps;             // enable the throughput snapshots for upload test writing
+  int c2s_snapsdelay;                   // specify the delay in the throughput snapshots thread for upload test
+  int c2s_snapsoffset;                  // specify the initial offset in the throughput snapshots thread for upload test
+  int c2s_streamsnum;                   // specify the number of streams (parallel TCP connections) for upload test
+  int s2c_duration;                     // download test duration
+  char s2c_throughputsnaps;             // enable the throughput snapshots for download test writing
+  int s2c_snapsdelay;                   // specify the delay in the throughput snapshots thread for download test
+  int s2c_snapsoffset;                  // specify the initial offset in the throughput snapshots thread for download test
+  int s2c_streamsnum;                   // specify the number of streams (parallel TCP connections) for download test
+  int tls;                              // true if we should communicate over SSL
 } Options;
 
 typedef struct portpair {
@@ -138,19 +141,15 @@ typedef struct portpair {
 } PortPair;
 
 // Structure defining NDT child process
-struct ndtchild {
+typedef struct ndtchild_s {
   int pid;  // process id
-  char addr[64];  // IP Address
-  char host[256];  // Hostname
   time_t stime;  // estimated start time of test
   time_t qtime;  // time when queued
-  int pipe;  // writing end of pipe
-  int running;  // Is process running?
-  int ctlsockfd;  // Socket file descriptor
-  int oldclient;  // Is old client?
+  int running;  // Was this told to start running tests?
+  int pipe;  // The writeable end of the pipe to the child
   char tests[24];  // What tests are scheduled?
-  struct ndtchild *next;  // next process in queue
-};
+  struct ndtchild_s *next;  // next process in queue
+} ndtchild;
 
 /* structure used to collect speed data in bins */
 struct spdpair {
@@ -328,7 +327,8 @@ int tcp_stat_setbuff(int sock, tcp_stat_agent* agent, tcp_stat_connection cn,
                    int autotune);/* Not used so no web10g version */
 void tcp_stat_get_data_recv(int sock, tcp_stat_agent* agent,
                             tcp_stat_connection cn, int count_vars);
-int tcp_stat_get_data(tcp_stat_snap** snap, int* testsock, int streamsNum, int ctlsock,
+
+int tcp_stat_get_data(tcp_stat_snap** snap, Connection* testsock, int streamsNum, Connection* ctl,
                       tcp_stat_agent* agent, int count_vars, const struct testoptions* const testoptions);
 
 int CwndDecrease(char* logname,
@@ -340,7 +340,7 @@ void tcp_stat_logvars_to_file(char* webVarsValuesLog, int connNum, struct tcp_va
 void tcp_stat_log_agg_vars_to_file(char* webVarsValuesLog, int connNum, struct tcp_vars* vars);
 
 int KillHung(void);
-void writeMeta(int compress, int cputime, int snaplog, int tcpdump,
+void writeMeta(int compress, int cputime, int snapshotting, int snaplog, int tcpdump,
                struct throughputSnapshot *s2c_ThroughputSnapshots, struct throughputSnapshot *c2s_ThroughputSnapshots);
 
 char *get_remotehostaddress();

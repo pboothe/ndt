@@ -14,7 +14,7 @@
 // Functions defined in websocket.c that we would like to unit test, but do not
 // want to expose to the rest of the program.
 int websocket_sha(const char* key, unsigned long len, unsigned char* dest);
-int send_digest_base64(int fd, const unsigned char* digest);
+int send_digest_base64(Connection* conn, const unsigned char* digest);
 
 /* Creates a socket pair and forks a subprocess to send data in one end. After
  * reading the data from the other end, reports whether all the data was the
@@ -36,14 +36,14 @@ void compare_sent_and_received(const unsigned char* raw_data_to_send,
   pid_t writer_pid;
   int writer_exit_code;
   int bytes_written;
-  int child_sock, parent_sock;
+  Connection child_conn = {-1, NULL}, parent_conn = {-1, NULL};
   int i;
 
   CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
-  parent_sock = sockets[0];
-  child_sock = sockets[1];
+  parent_conn.socket = sockets[0];
+  child_conn.socket = sockets[1];
   if ((writer_pid = fork()) == 0) {
-    bytes_written = writen(child_sock, raw_data_to_send, raw_length);
+    bytes_written = writen_any(&child_conn, raw_data_to_send, raw_length);
     if (bytes_written == raw_length) {
       exit(0);
     } else {
@@ -53,7 +53,7 @@ void compare_sent_and_received(const unsigned char* raw_data_to_send,
     received_data = (unsigned char*)malloc(expected_length * sizeof(char));
     CHECK(received_data != NULL);
     bytes_read =
-        recv_websocket_msg(parent_sock, received_data, expected_length);
+        recv_websocket_msg(&parent_conn, received_data, expected_length);
     if (expected_error) {
       ASSERT(bytes_read < 0, "Expected an error, but got success");
       bytes_read *= -1;
@@ -191,13 +191,16 @@ void test_messages_too_large() {
   unsigned char expected[5];  // space for the Hello to be read
   int64_t err;
   char* err_str = "no error";
+  Connection child_conn = {-1, NULL}, parent_conn = {-1, NULL};
   CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+  child_conn.socket = sockets[0];
+  parent_conn.socket = sockets[1];
   if ((child_pid = fork()) == 0) {
-    err = (int64_t)writen(sockets[0], raw_data, sizeof(raw_data));
+    err = (int64_t)writen_any(&child_conn, raw_data, sizeof(raw_data));
     ASSERT(err == sizeof(raw_data), "writen failed (%d)", (int)err);
     exit(0);
   } else {
-    err = recv_websocket_msg(sockets[1], expected, MAX_INT64);
+    err = recv_websocket_msg(&parent_conn, expected, MAX_INT64);
     if (err < 0) {
       err = -err;
       err_str = strerror(err);
@@ -238,14 +241,17 @@ void test_recv_websocket_ndt_msg() {
   int sockets[2];
   pid_t child_pid;
   int child_exit_code;
+  Connection child_conn = {-1, NULL}, parent_conn = {-1, NULL};
   CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+  child_conn.socket = sockets[0];
+  parent_conn.socket = sockets[1];
   if ((child_pid = fork()) == 0) {
-    err = writen(sockets[0], raw_data, sizeof(raw_data));
+    err = writen_any(&child_conn, raw_data, sizeof(raw_data));
     ASSERT(err = sizeof(raw_data), "writen failed (%d)", (int)err);
     exit(0);
   } else {
-    err = recv_websocket_ndt_msg(sockets[1], &received_type, received_contents,
-                                 &received_len);
+    err = recv_websocket_ndt_msg(&parent_conn, &received_type,
+                                 received_contents, &received_len);
     CHECK(err == 0);
     ASSERT(received_len == sizeof(expected_contents), "%d != %zu", received_len,
            sizeof(expected_contents));
@@ -273,22 +279,25 @@ void check_websocket_handshake(const char* header, const char* response) {
   int bytes_written, bytes_read;
   int err;
   int i;
+  Connection conn = {-1, NULL};
 
   CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
   child_socket = sockets[0];
   parent_socket = sockets[1];
   if ((client_pid = fork()) == 0) {
-    err = initialize_websocket_connection(child_socket, 0, "ndt");
+    conn.socket = child_socket;
+    err = initialize_websocket_connection(&conn, 0, "ndt");
     ASSERT(err == 0, "Initialization failed with exit code %d (%s)", err,
            strerror(err));
-    CHECK(writen(child_socket, "SIGNAL", 6) == 6);
+    CHECK(writen_any(&conn, "SIGNAL", 6) == 6);
     exit(0);  // Everything was fine.
   } else {
     // The writer uses the second socket.
-    bytes_written = writen(parent_socket, header, strlen(header));
+    conn.socket = parent_socket;
+    bytes_written = writen_any(&conn, header, strlen(header));
     ASSERT(bytes_written == strlen(header), "write returned %d and not %zu",
            bytes_written, strlen(header));
-    bytes_read = readn(parent_socket, scratch, strlen(response));
+    bytes_read = readn_any(&conn, scratch, strlen(response));
     ASSERT(bytes_read == strlen(response), "readn returned %d, we wanted %zu",
            bytes_read, strlen(response));
     for (i = 0; i < strlen(response); i++) {
@@ -299,7 +308,7 @@ void check_websocket_handshake(const char* header, const char* response) {
            "response differed from what was read. We read:\n'%s' but we "
            "wanted:\n'%s'\n",
            scratch, response);
-    CHECK(readn(parent_socket, scratch, 6) == 6);
+    CHECK(readn_any(&conn, scratch, 6) == 6);
     CHECK(strncmp(scratch, "SIGNAL", 6) == 0);
     waitpid(client_pid, &client_exit_code, 0);
     CHECK(WIFEXITED(client_exit_code) && WEXITSTATUS(client_exit_code) == 0);
@@ -355,6 +364,30 @@ void test_firefox_websocket_handshake() {
   check_websocket_handshake(header, response);
 }
 
+void test_ie11_websocket_handshake() {
+  const char* header = 
+       "GET /ndt_protocol HTTP/1.1\r\n"
+       "Origin: http://internethealthtest.org\r\n"
+       "Sec-WebSocket-Protocol: ndt\r\n"
+       "Sec-WebSocket-Key: 3XPlfzNozv805tiHXD6ZyA==\r\n"
+       "Connection: Upgrade\r\n"
+       "Upgrade: Websocket\r\n"  // Thanks IE11, for capitalizing Websocket
+       "Sec-WebSocket-Version: 13\r\n"
+       "User-Agent: Mozilla/5.0 (Windows NT 6.3; Trident/7.0; rv:11.0) like Gecko\r\n"
+       "Host: ndt.iupui.mlab1.mia05.measurement-lab.org:3001\r\n"
+       "DNT: 1\r\n"
+       "Cache-Control: no-cache\r\n"
+       "\r\n";
+  const char* response =
+      "HTTP/1.1 101 Switching Protocols\r\n"
+      "Upgrade: websocket\r\n"
+      "Connection: Upgrade\r\n"
+      "Sec-WebSocket-Protocol: ndt\r\n"
+      "Sec-WebSocket-Accept: LHroUp9DVDHErY83w6Bm0zUY9kg=\r\n"
+      "\r\n";
+  check_websocket_handshake(header, response);
+}
+
 void test_websocket_sha() {
   const char key[] = "dGhlIHNhbXBsZSBub25jZQ==";
   const unsigned char expected_digest[20] = {
@@ -371,20 +404,20 @@ void check_send_digest_base64(const unsigned char* digest,
   int child_exit_code;
   char scratch[1024];
   int sockets[2];
-  int child_socket, parent_socket;
+  Connection child_conn = {-1, NULL}, parent_conn = {-1, NULL};
   CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
-  child_socket = sockets[0];
-  parent_socket = sockets[1];
+  child_conn.socket = sockets[0];
+  parent_conn.socket = sockets[1];
   if ((child_pid = fork()) == 0) {
     // Send the data down the pipe.
-    CHECK(send_digest_base64(child_socket, digest) == 0);
-    CHECK(writen(child_socket, "SIGNAL", 6) == 6);
+    CHECK(send_digest_base64(&child_conn, digest) == 0);
+    CHECK(writen_any(&child_conn, "SIGNAL", 6) == 6);
     exit(0);
   } else {
     // Receive the data and verify that it matches expectations.
-    CHECK(readn(parent_socket, scratch, strlen(expected)) == strlen(expected));
+    CHECK(readn_any(&parent_conn, scratch, strlen(expected)) == strlen(expected));
     CHECK(strncmp(expected, scratch, strlen(expected)) == 0);
-    CHECK(readn(parent_socket, scratch, 6) == 6);
+    CHECK(readn_any(&parent_conn, scratch, 6) == 6);
     CHECK(strncmp("SIGNAL", scratch, 6) == 0);
     // Make sure the child exited successfully
     waitpid(child_pid, &child_exit_code, 0);
@@ -401,7 +434,7 @@ void test_send_digest_base64() {
 }
 
 int main() {
-  set_debuglvl(1024);
+  set_debuglvl(-1);
   return RUN_TEST(test_messages_too_large) | RUN_TEST(test_recv_jumbo_msg) |
          RUN_TEST(test_recv_large_msg) | RUN_TEST(test_recv_masked_msg) |
          RUN_TEST(test_recv_unmasked_msg_closes_connection) |
@@ -412,5 +445,6 @@ int main() {
          RUN_TEST(test_send_digest_base64) |
 	 RUN_TEST(test_websocket_handshake) |
          RUN_TEST(test_firefox_websocket_handshake) |
+         RUN_TEST(test_ie11_websocket_handshake) |
          RUN_TEST(test_websocket_sha);
 }
